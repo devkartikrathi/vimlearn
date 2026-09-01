@@ -2,8 +2,9 @@
    ask for keys it has already taught? */
 import { ALL_LESSONS, allowedKeysFor } from "../src/lib/curriculum/lessons";
 import { buildGoal } from "../src/lib/vim/goals";
-import { generateBoard, infest, makeRng, pick } from "../src/lib/vim/generators";
-import { createState } from "../src/lib/vim/reducer";
+import { BUG_COUNT, generateBoard, infest, makeRng, pick } from "../src/lib/vim/generators";
+import { applyKey, createState } from "../src/lib/vim/reducer";
+import type { GameConfig } from "../src/lib/vim/types";
 
 const rng = makeRng(20260901);
 let problems = 0;
@@ -26,13 +27,14 @@ for (const lesson of ALL_LESSONS) {
    for (let i = 0; i < 40 && !built; i++) {
     const kind = pick(rng, lesson.drill.boards);
     let lines = generateBoard(kind, rng);
-    let original: string[] | undefined;
-    if (lesson.drill.tasks.some((t) => t.type === "bugFix")) {
-      original = lines;
-      lines = infest(lines, rng, 10).lines;
-    }
     while (lesson.drill.minimumLines && lines.length < lesson.drill.minimumLines) {
       lines = [...lines, ...generateBoard(kind, rng)];
+    }
+    let original: string[] | undefined;
+    if (lesson.drill.tasks.some((t) => t.type === "bugFix")) {
+      const infested = infest(lines, rng, BUG_COUNT);
+      original = infested.original;
+      lines = infested.lines;
     }
     const vim = createState(lines);
     const goal = buildGoal({
@@ -45,9 +47,25 @@ for (const lesson of ALL_LESSONS) {
     });
     if (!goal) continue;
     built++;
+    // Replay through the emulator: a letter typed into insert mode, or handed to
+    // f as its argument, is text — only keys the gate actually sees are commands.
+    const config: GameConfig = {
+      allowed,
+      goalsToComplete: lesson.drill.goals,
+      motionsOnly: lesson.drill.motionsOnly,
+      readonly: lesson.drill.readonly,
+      disableCallouts: true,
+    };
+    let s = vim;
     for (const k of goal.solution) {
-      if (k.length === 1 && /[a-zA-Z0-9]/.test(k) === false) continue; // literal text
-      if (!allowedSet.has(k) && !/^\d+$/.test(k)) missing.add(k);
+      const gated =
+        s.mode !== "insert" &&
+        !s.searchInput &&
+        !s.pending.awaitingChar &&
+        !s.pending.awaitingG &&
+        !s.pending.textObject;
+      if (gated && !allowedSet.has(k) && !/^[0-9]$/.test(k)) missing.add(k);
+      s = applyKey(s, k, config);
     }
    }
    rounds += built;

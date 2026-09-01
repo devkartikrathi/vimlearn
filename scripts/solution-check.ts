@@ -2,7 +2,7 @@
    advertise as optimal and confirm the goal actually completes. */
 import { ALL_LESSONS, allowedKeysFor } from "../src/lib/curriculum/lessons";
 import { buildGoal, judge } from "../src/lib/vim/goals";
-import { generateBoard, makeRng, pick } from "../src/lib/vim/generators";
+import { BUG_COUNT, generateBoard, infest, makeRng, pick } from "../src/lib/vim/generators";
 import { applyKey, createState } from "../src/lib/vim/reducer";
 import type { GameConfig } from "../src/lib/vim/types";
 
@@ -12,7 +12,7 @@ let broken = 0;
 const rows: string[] = [];
 
 for (const lesson of ALL_LESSONS) {
-  if (!lesson.drill || lesson.drill.tasks.some((t) => t.type === "bugFix")) {
+  if (!lesson.drill) {
     rows.push(`  --    ${lesson.slug.padEnd(28)} no scored solution`);
     continue;
   }
@@ -37,6 +37,12 @@ for (const lesson of ALL_LESSONS) {
       while (lesson.drill.minimumLines && lines.length < lesson.drill.minimumLines) {
         lines = [...lines, ...generateBoard(kind, rng)];
       }
+      let original: string[] | undefined;
+      if (lesson.drill.tasks.some((t) => t.type === "bugFix")) {
+        const infested = infest(lines, rng, BUG_COUNT);
+        original = infested.original;
+        lines = infested.lines;
+      }
       vim = createState(lines);
       goal = buildGoal({
         task: pick(rng, lesson.drill.tasks),
@@ -44,6 +50,7 @@ for (const lesson of ALL_LESSONS) {
         cursor: vim.cursor,
         rng,
         allowed,
+        original,
       });
     }
     if (!goal) continue;

@@ -9,9 +9,9 @@ import { Progress } from "@/components/ui/progress";
 import { VimEditor } from "./vim-editor";
 import { Keys } from "./keycap";
 import { StatsPanel } from "./stats-panel";
-import { applyKey, createState } from "@/lib/vim/reducer";
+import { applyKey, createState, settle } from "@/lib/vim/reducer";
 import { buildGoal, judge, score } from "@/lib/vim/goals";
-import { generateBoard, infest, makeRng, pick, type Rng } from "@/lib/vim/generators";
+import { BUG_COUNT, generateBoard, infest, makeRng, pick, type Rng } from "@/lib/vim/generators";
 import type {
   GameConfig,
   Goal,
@@ -59,14 +59,16 @@ function buildRound(drill: DrillConfig, allowed: string[], rng: Rng): Round {
   for (let attempt = 0; attempt < 40; attempt++) {
     const kind = pick(rng, drill.boards);
     let lines = generateBoard(kind, rng);
-    let original: string[] | undefined;
-
-    if (drill.tasks.some((t) => t.type === "bugFix")) {
-      original = lines;
-      lines = infest(lines, rng, 12).lines;
-    }
     while (drill.minimumLines && lines.length < drill.minimumLines) {
       lines = [...lines, ...generateBoard(kind, rng)];
+    }
+
+    // the bugs eat the finished board, so the repair target is what it was
+    let original: string[] | undefined;
+    if (drill.tasks.some((t) => t.type === "bugFix")) {
+      const infested = infest(lines, rng, BUG_COUNT);
+      original = infested.original;
+      lines = infested.lines;
     }
 
     const vim = createState(lines);
@@ -182,8 +184,7 @@ export function LessonRunner({ lesson }: { lesson: Lesson }) {
           return { ...current, vim, goal: null };
         }
 
-        const settled: VimState = { ...vim, mode: vim.mode === "insert" ? "insert" : "normal" };
-        const next = nextGoal(settled, current.original);
+        const next = nextGoal(settle(vim), current.original);
         goalStart.current = Date.now();
         keysAtStart.current = next.vim.keystrokes.length;
         setStatus("incomplete");
@@ -253,7 +254,8 @@ export function LessonRunner({ lesson }: { lesson: Lesson }) {
             {status === "must_undo" ? (
               <span className="flex items-center gap-1.5 text-amber-600 dark:text-amber-500">
                 <Undo2 className="size-3.5" />
-                That is not the target — press u to undo
+                That is not the target — press{" "}
+                {vim.mode === "normal" ? "u" : "Esc, then u"} to undo
               </span>
             ) : null}
             <span className="ml-auto flex items-center gap-3">

@@ -704,6 +704,29 @@ export function applyKey(
   }
 }
 
+/**
+ * Park the editor in a clean normal-mode state between goals — a live insert,
+ * a half-typed operator or a stale visual anchor left over from the goal just
+ * finished would silently corrupt the next one.
+ */
+export function settle(prev: VimState): VimState {
+  const cursor = clampCursor(prev.lines, prev.cursor, "normal");
+  const s: VimState = {
+    ...prev,
+    lines: [...prev.lines],
+    mode: "normal",
+    visualAnchor: null,
+    searchInput: null,
+    callout: null,
+    cursor,
+    // a sticky column left over from the last goal would send the first j or k
+    // of the next one somewhere the solved-for route never went
+    desiredX: cursor.x,
+  };
+  clearPending(s);
+  return s;
+}
+
 export function visualRange(s: VimState): Range {
   const anchor = s.visualAnchor ?? clone(s.cursor);
   const [a, b] = sortRange(anchor, clone(s.cursor));

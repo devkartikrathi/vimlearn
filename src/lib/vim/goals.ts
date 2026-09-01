@@ -104,7 +104,39 @@ const MOTION_EDGES: Array<{ keys: string[]; needs: string }> = [
   { keys: ["<C-u>"], needs: "<C-u>" },
 ];
 
-const MAX_SEARCH_NODES = 6000;
+/** No drill ever needs a longer route than this; the cap keeps the search finite. */
+const MAX_ROUTE_KEYS = 40;
+
+interface SearchNode {
+  cursor: Position;
+  /** Vim's sticky column: j and k aim at it, not at the current column */
+  desiredX: number;
+  keys: string[];
+}
+
+/**
+ * h, j, k and l are taught in the first drill and never taken away, so there is
+ * always a route even when the optimal search runs out of road.
+ */
+function naivePath(
+  lines: string[],
+  from: Position,
+  to: Position,
+  allowed: string[],
+): string[] {
+  if (!["h", "j", "k", "l"].every((k) => allowed.includes(k))) return [];
+  // j and k carry the sticky column the whole way down, so the row move lands
+  // on the start column, clipped to the destination line
+  const landed =
+    from.y === to.y
+      ? from.x
+      : Math.min(from.x, Math.max(0, (lines[to.y] ?? "").length - 1));
+  const dx = to.x - landed;
+  return [
+    ...rowPath(from.y, to.y),
+    ...Array.from({ length: Math.abs(dx) }, () => (dx > 0 ? "l" : "h")),
+  ];
+}
 
 export function shortestKeyPath(
   lines: string[],
@@ -117,35 +149,53 @@ export function shortestKeyPath(
   const edges = MOTION_EDGES.filter((e) => allowed.includes(e.needs));
   if (!edges.length) return [];
 
-  const key = (p: Position) => `${p.x},${p.y}`;
-  const best = new Map<string, number>([[key(from), 0]]);
-  const via = new Map<string, string[]>([[key(from), []]]);
-  const frontier: Position[] = [from];
-  let visited = 0;
+  // The sticky column is part of the state: two routes that end on the same
+  // character can send the next j somewhere different, so a search keyed on
+  // position alone hands out routes that do not replay in the editor.
+  const key = (n: { cursor: Position; desiredX: number }) =>
+    `${n.cursor.x},${n.cursor.y},${n.desiredX}`;
 
-  // costs are 1 or 2 keys, so a two-bucket sweep is enough to stay optimal
-  while (frontier.length && visited < MAX_SEARCH_NODES) {
-    frontier.sort((a, b) => (best.get(key(a)) ?? 0) - (best.get(key(b)) ?? 0));
-    const current = frontier.shift()!;
-    const ck = key(current);
-    visited++;
-    if (samePos(current, to)) return via.get(ck)!;
+  const start: SearchNode = { cursor: clone(from), desiredX: from.x, keys: [] };
+  const best = new Map<string, number>([[key(start), 0]]);
+  // every edge costs one or two keys, so a bucket per cost stays optimal
+  // without ever sorting the frontier
+  const buckets: SearchNode[][] = [[start]];
 
-    const cost = best.get(ck) ?? 0;
-    const path = via.get(ck) ?? [];
+  for (let cost = 0; cost < buckets.length && cost <= MAX_ROUTE_KEYS; cost++) {
+    const bucket = buckets[cost] ?? [];
+    for (const node of bucket) {
+      if ((best.get(key(node)) ?? Infinity) < cost) continue;
+      if (samePos(node.cursor, to)) return node.keys;
 
-    for (const edge of edges) {
-      let state = createState(lines, current);
-      for (const k of edge.keys) state = applyKey(state, k, config);
-      const nk = key(state.cursor);
-      const nextCost = cost + edge.keys.length;
-      if ((best.get(nk) ?? Infinity) <= nextCost) continue;
-      best.set(nk, nextCost);
-      via.set(nk, [...path, ...edge.keys]);
-      frontier.push({ ...state.cursor });
+      for (const edge of edges) {
+        let state: VimState = { ...createState(lines, node.cursor), desiredX: node.desiredX };
+        for (const k of edge.keys) state = applyKey(state, k, config);
+        const next: SearchNode = {
+          cursor: clone(state.cursor),
+          desiredX: state.desiredX,
+          keys: [...node.keys, ...edge.keys],
+        };
+        const nextCost = cost + edge.keys.length;
+        if ((best.get(key(next)) ?? Infinity) <= nextCost) continue;
+        best.set(key(next), nextCost);
+        (buckets[nextCost] ??= []).push(next);
+      }
     }
   }
-  return via.get(key(to)) ?? [];
+  return naivePath(lines, from, to, allowed);
+}
+
+/** Where a run of keys actually leaves the cursor, asked of the emulator itself. */
+function replayCursor(
+  lines: string[],
+  from: Position,
+  keys: string[],
+  allowed: string[],
+): Position | null {
+  const config: GameConfig = { allowed, goalsToComplete: 0, motionsOnly: true };
+  let state = createState(lines, from);
+  for (const k of keys) state = applyKey(state, k, config);
+  return toText(state.lines) === toText(lines) ? clone(state.cursor) : null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -235,6 +285,44 @@ function prefixes(
   return out;
 }
 
+/** Every buffer state on the way through typing `typed` at `at`. */
+function typingStates(lines: string[], at: Position, typed: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i <= typed.length; i++) {
+    out.push(toText(insertAt(lines, at, typed.slice(0, i)).lines));
+  }
+  return out;
+}
+
+/** `j` / `k` far enough to reach a line — all A, I, o and O care about. */
+function rowPath(from: number, to: number): string[] {
+  return Array.from({ length: Math.abs(to - from) }, () => (to > from ? "j" : "k"));
+}
+
+export interface Damage {
+  /** where the eaten character belongs in the *damaged* buffer */
+  at: Position;
+  char: string;
+}
+
+/**
+ * The leftmost character the bugs ate that has not been typed back yet. Read
+ * off the live buffer rather than remembered, so repairing one bug renumbers
+ * the ones after it for free.
+ */
+export function firstDamage(current: string[], original: string[]): Damage | null {
+  for (let y = 0; y < original.length; y++) {
+    const now = current[y];
+    const was = original[y];
+    if (now === undefined || now === was) continue;
+    let x = 0;
+    while (x < now.length && now[x] === was[x]) x++;
+    if (was[x] === undefined) continue;
+    return { at: { x, y }, char: was[x] };
+  }
+  return null;
+}
+
 export interface GoalBuildInput {
   task: TaskSpec;
   lines: string[];
@@ -304,19 +392,21 @@ export function buildGoal(input: GoalBuildInput): Goal | null {
 
     case "findChar": {
       const line = lines[cursor.y] ?? "";
+      // f and t search from the character *after* the cursor; only ask for a
+      // character whose first hit is far enough away to be worth a jump
       const after = line.slice(cursor.x + 2);
       const candidates = Array.from(new Set(after.split("").filter((c) => /\S/.test(c))));
       if (!candidates.length) return null;
       const ch = pick(rng, candidates);
-      const idx = line.indexOf(ch, cursor.x + 2);
-      if (idx === -1) return null;
-      const target = { x: task.till ? idx - 1 : idx, y: cursor.y };
+      const keys = [task.till ? "t" : "f", ch];
+      const target = replayCursor(lines, cursor, keys, allowed);
+      if (!target || samePos(target, cursor) || target.x < cursor.x + 2) return null;
       return {
         kind: "cursor",
         highlights: [{ start: target, end: { x: target.x + 1, y: target.y }, linewise: false }],
         target,
         textBefore: before,
-        solution: [task.till ? "t" : "f", ch],
+        solution: keys,
         instruction: `Use ${task.till ? "t" : "f"} to land on the highlighted character — the target character is "${ch}".`,
       };
     }
@@ -336,9 +426,10 @@ export function buildGoal(input: GoalBuildInput): Goal | null {
         const repeated = [...occurrences.entries()].filter(([, v]) => v.length >= 2);
         if (!repeated.length) return null;
         const [term, spots] = pick(rng, repeated);
-        const i = pickInt(rng, 0, spots.length - 2);
-        const from = spots[i];
-        const target = spots[i + 1];
+        const from = pick(rng, spots);
+        const keys = [...shortestKeyPath(lines, cursor, from, allowed), "*"];
+        const target = replayCursor(lines, cursor, keys, allowed);
+        if (!target || samePos(target, from)) return null;
         return {
           kind: "cursor",
           highlights: [
@@ -346,18 +437,19 @@ export function buildGoal(input: GoalBuildInput): Goal | null {
           ],
           target,
           textBefore: before,
-          solution: [...shortestKeyPath(lines, cursor, from, allowed), "*"],
+          solution: keys,
           instruction: `Put the cursor on a "${term}" and press * to jump to the next one.`,
         };
       }
 
-      const pool = [...occurrences.entries()].filter(
-        ([, v]) => !v.every((p) => p.y === cursor.y && p.x === cursor.x),
-      );
+      const pool = [...occurrences.keys()];
       if (!pool.length) return null;
-      const [term, spots] = pick(rng, pool);
-      const found = spots.find((p) => !(p.y === cursor.y && p.x === cursor.x));
-      if (!found) return null;
+      const term = pick(rng, pool);
+      const keys = ["/", ...term.split(""), "<CR>"];
+      // where `/` lands depends on where the cursor is now and on wrapping, so
+      // ask the emulator rather than guessing at the first match in the file
+      const found = replayCursor(lines, cursor, keys, allowed);
+      if (!found || samePos(found, cursor)) return null;
       return {
         kind: "cursor",
         highlights: [
@@ -365,7 +457,7 @@ export function buildGoal(input: GoalBuildInput): Goal | null {
         ],
         target: found,
         textBefore: before,
-        solution: ["/", ...term.split(""), "<CR>"],
+        solution: keys,
         instruction: `Search for "${term}" with / and press Enter.`,
       };
     }
@@ -475,49 +567,65 @@ export function buildGoal(input: GoalBuildInput): Goal | null {
 
     /* ---------------- insert ---------------- */
     case "insertAt": {
-      const anchors = lines.map((_, y) => ({ x: 0, y })).filter((p) => (lines[p.y] ?? "").trim() !== "");
+      // i and a are about a *place in a line*, so they get drilled on a word;
+      // I, A, o and O are about a *line*, so they get drilled with a comment
+      if (task.where === "before" || task.where === "after") {
+        return wordInsertGoal(input, task.where === "before");
+      }
+
+      const anchors = lines
+        .map((_, y) => ({ x: 0, y }))
+        .filter((p) => (lines[p.y] ?? "").trim() !== "");
       const at = farFrom(rng, anchors, cursor, 1);
       if (!at) return null;
       const marker = pick(rng, ["// TODO", "// FIXME", "// NOTE"]);
-      const next = [...lines];
-      const path = shortestKeyPath(lines, cursor, { x: 0, y: at.y }, allowed);
-      // o, O and I all respect the existing indentation, so the target text must too
-      const indent = (lines[at.y].match(/^\s*/) ?? [""])[0];
-      let solution: string[];
+      const line = lines[at.y];
+      // A, I, o and O all park themselves on the line, so only the row matters
+      const path = rowPath(cursor.y, at.y);
+      // o and O copy the indentation of the line they open from
+      const indent = (line.match(/^\s*/) ?? [""])[0];
+
+      let enter: string;
+      let typed: string;
+      let canvas = lines;
+      let insertPos: Position;
       let instruction: string;
+
       switch (task.where) {
         case "lineEnd":
-          next[at.y] = `${next[at.y]} ${marker}`;
-          solution = [...path, "A", " ", ...marker.split(""), "<Esc>"];
-          instruction = `Append " ${marker}" to the end of the highlighted line with A.`;
+          enter = "A";
+          typed = ` ${marker}`;
+          insertPos = { x: line.length, y: at.y };
+          instruction = `Append " ${marker}" to the end of the highlighted line with A, then press Esc.`;
           break;
         case "lineStart":
-          next[at.y] = `${indent}${marker} ${next[at.y].trimStart()}`;
-          solution = [...path, "I", ...marker.split(""), " ", "<Esc>"];
-          instruction = `Insert "${marker} " at the start of the highlighted line with I.`;
+          enter = "I";
+          typed = `${marker} `;
+          insertPos = { x: firstNonBlank(line), y: at.y };
+          instruction = `Insert "${marker} " at the start of the highlighted line with I, then press Esc.`;
           break;
         case "openBelow":
-          next.splice(at.y + 1, 0, indent + marker);
-          solution = [...path, "o", ...marker.split(""), "<Esc>"];
-          instruction = `Open a new line below the highlighted one with o and type "${marker}".`;
+        case "openAbove": {
+          const below = task.where === "openBelow";
+          enter = below ? "o" : "O";
+          typed = marker;
+          canvas = [...lines];
+          canvas.splice(below ? at.y + 1 : at.y, 0, indent);
+          insertPos = { x: indent.length, y: below ? at.y + 1 : at.y };
+          instruction = `Open a new line ${below ? "below" : "above"} the highlighted one with ${enter}, type "${marker}", then press Esc.`;
           break;
-        case "openAbove":
-          next.splice(at.y, 0, indent + marker);
-          solution = [...path, "O", ...marker.split(""), "<Esc>"];
-          instruction = `Open a new line above the highlighted one with O and type "${marker}".`;
-          break;
-        default:
-          next[at.y] = `${indent}${marker} ${next[at.y].trimStart()}`;
-          solution = [...path, "_", "i", ...marker.split(""), " ", "<Esc>"];
-          instruction = `Insert "${marker} " at the start of the highlighted line with i.`;
+        }
       }
+
+      const states = typingStates(canvas, insertPos, typed);
       return {
         kind: "text_match",
         highlights: [{ start: { x: 0, y: at.y }, end: { x: 0, y: at.y }, linewise: true }],
         textBefore: before,
-        textAfter: toText(next),
-        intermediates: [],
-        solution,
+        textAfter: states[states.length - 1],
+        // every half-typed state is legal, or the learner is scolded mid-word
+        intermediates: states,
+        solution: [...path, enter, ...typed.split(""), "<Esc>"],
         instruction,
       };
     }
@@ -541,17 +649,84 @@ export function buildGoal(input: GoalBuildInput): Goal | null {
 
     case "bugFix": {
       if (!input.original) return null;
+      const damage = firstDamage(lines, input.original);
+      if (!damage) return null; // the board is clean — the game is over
+      const { at, char } = damage;
+      const line = lines[at.y] ?? "";
+      // `i` types in front of the cursor, but normal mode cannot park past the
+      // last character — when the bug ate the end of the line, `a` appends
+      const append = line.length > 0 && at.x >= line.length;
+      const landing: Position = { x: append ? line.length - 1 : at.x, y: at.y };
+      const next = [...lines];
+      next[at.y] = line.slice(0, at.x) + char + line.slice(at.x);
       return {
         kind: "text_match",
-        highlights: [],
+        highlights: [
+          { start: landing, end: { x: landing.x + 1, y: landing.y }, linewise: false },
+        ],
         textBefore: before,
-        textAfter: toText(input.original),
+        textAfter: toText(next),
         intermediates: [],
-        solution: ["i", "?", "<Esc>"],
-        instruction: `Restore every character the bugs ate. Use insert mode to type them back.`,
+        solution: [
+          ...shortestKeyPath(lines, cursor, landing, allowed),
+          append ? "a" : "i",
+          char,
+          "<Esc>",
+        ],
+        instruction: `A bug ate a "${char}" here. Land on the highlighted character, press ${append ? "a" : "i"}, type "${char}", then press Esc.`,
       };
     }
   }
+}
+
+const PREFIXES = ["my", "new", "next", "raw"] as const;
+const SUFFIXES = ["Id", "List", "Ref", "s"] as const;
+
+/** Renaming `const` to `myconst` teaches nothing and reads like a mistake. */
+const RESERVED = new Set([
+  "const", "let", "var", "return", "function", "await", "async", "new",
+  "if", "else", "throw", "export", "default", "import", "class", "this",
+]);
+
+/**
+ * The i / a drill: both keys are about landing on one specific character, so
+ * the goal names a word and asks for text in front of it or behind it.
+ */
+function wordInsertGoal(input: GoalBuildInput, front: boolean): Goal | null {
+  const { lines, cursor, rng, allowed } = input;
+  const starts = wordStarts(lines).filter((p) => /[A-Za-z_]/.test(lines[p.y][p.x]));
+  const at = farFrom(rng, starts, cursor, 3);
+  if (!at) return null;
+  const line = lines[at.y];
+  const word = /^[A-Za-z0-9_]+/.exec(line.slice(at.x))?.[0];
+  // "on" -> "onRef" is a poor advertisement for a rename
+  if (!word || word.length < 3 || RESERVED.has(word)) return null;
+  // a word this drill has already renamed makes for a baffling instruction
+  if (PREFIXES.some((pre) => word.startsWith(pre))) return null;
+
+  const addition = front ? pick(rng, PREFIXES) : pick(rng, SUFFIXES);
+  if (word.endsWith(addition)) return null;
+  // `i` opens in front of the character it is pressed on; `a` opens behind it
+  const landing: Position = front ? at : { x: at.x + word.length - 1, y: at.y };
+  const insertPos: Position = { x: front ? at.x : at.x + word.length, y: at.y };
+  const states = typingStates(lines, insertPos, addition);
+
+  return {
+    kind: "text_match",
+    highlights: [{ start: at, end: { x: at.x + word.length, y: at.y }, linewise: false }],
+    textBefore: toText(lines),
+    textAfter: states[states.length - 1],
+    intermediates: states,
+    solution: [
+      ...shortestKeyPath(lines, cursor, landing, allowed),
+      front ? "i" : "a",
+      ...addition.split(""),
+      "<Esc>",
+    ],
+    instruction: front
+      ? `Turn "${word}" into "${addition}${word}": land on its first character, press i, type "${addition}", then press Esc.`
+      : `Turn "${word}" into "${word}${addition}": land on its last character, press a, type "${addition}", then press Esc.`,
+  };
 }
 
 function stepMotion(lines: string[], from: Position, key: string): Position {
@@ -652,7 +827,11 @@ export function judge(goal: Goal, state: VimState): GoalStatus {
     }
 
     default: {
-      if (text === goal.textAfter) return "completed";
+      // An edit is not finished until Esc: handing out the next goal while the
+      // learner is still in insert mode would swallow every key they press.
+      if (text === goal.textAfter) {
+        return state.mode === "normal" ? "completed" : "incomplete";
+      }
       if (text === goal.textBefore) return "incomplete";
       if (goal.intermediates?.includes(text)) return "incomplete";
       return "must_undo";

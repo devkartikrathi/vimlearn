@@ -1,3 +1,5 @@
+import type { Position } from "./types";
+
 /**
  * Boards are synthesized, never stored — a lesson you repeat five times
  * should never show you the same code twice.
@@ -151,24 +153,51 @@ export function generateBoard(kind: BoardKind, rng: Rng): string[] {
   }
 }
 
-/** Chew characters out of the source — the Bug Squasher board. */
+/** How many characters the bugs eat out of a Bug Squasher board. */
+export const BUG_COUNT = 6;
+
+export interface Bite {
+  /** where the eaten character used to be, in the *original* buffer */
+  at: Position;
+  char: string;
+}
+
+/**
+ * Chew characters out of the source — the Bug Squasher board. Bites are kept
+ * apart so every gap reads as its own bug, and the eaten characters come back
+ * with the board so each repair can be set and scored as its own goal.
+ */
 export function infest(
   lines: string[],
   rng: Rng,
   bites: number,
-): { lines: string[]; original: string[] } {
-  const out = [...lines];
-  let made = 0;
+): { lines: string[]; original: string[]; bites: Bite[] } {
+  const pool: Bite[] = [];
+  lines.forEach((line, y) => {
+    for (let x = 0; x < line.length; x++) {
+      if (/[A-Za-z]/.test(line[x])) pool.push({ at: { x, y }, char: line[x] });
+    }
+  });
+
+  const chosen: Bite[] = [];
   let guard = 0;
-  while (made < bites && guard++ < 300) {
-    const y = pickInt(rng, 0, out.length - 1);
-    const line = out[y];
-    const candidates: number[] = [];
-    for (let i = 0; i < line.length; i++) if (/[A-Za-z]/.test(line[i])) candidates.push(i);
-    if (!candidates.length) continue;
-    const x = pick(rng, candidates);
-    out[y] = line.slice(0, x) + line.slice(x + 1);
-    made++;
+  while (chosen.length < bites && pool.length && guard++ < 500) {
+    const bite = pick(rng, pool);
+    // neighbouring bites read as one bug, and repairing the left one would
+    // shift the right one out from under its highlight
+    const crowded = chosen.some(
+      (b) => b.at.y === bite.at.y && Math.abs(b.at.x - bite.at.x) < 3,
+    );
+    if (!crowded) chosen.push(bite);
   }
-  return { lines: out, original: lines };
+
+  // eat right-to-left so the bites we have already chosen keep their columns
+  const out = [...lines];
+  [...chosen]
+    .sort((a, b) => (a.at.y === b.at.y ? b.at.x - a.at.x : b.at.y - a.at.y))
+    .forEach(({ at }) => {
+      out[at.y] = out[at.y].slice(0, at.x) + out[at.y].slice(at.x + 1);
+    });
+
+  return { lines: out, original: lines, bites: chosen };
 }

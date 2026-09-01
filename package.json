@@ -7,10 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "npm run test:engine && npm run test:curriculum && npm run test:solutions",
+    "test": "npm run test:engine && npm run test:curriculum && npm run test:solutions && npm run test:rounds",
     "test:engine": "tsx scripts/engine-check.ts",
     "test:curriculum": "tsx scripts/curriculum-check.ts",
-    "test:solutions": "tsx scripts/solution-check.ts"
+    "test:solutions": "tsx scripts/solution-check.ts",
+    "test:rounds": "tsx scripts/round-check.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

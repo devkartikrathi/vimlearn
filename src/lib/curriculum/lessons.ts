@@ -1,3 +1,4 @@
+import { BUG_COUNT } from "@/lib/vim/generators";
 import type { Chapter, Lesson } from "./types";
 
 export const CHAPTERS: Chapter[] = [
@@ -104,7 +105,10 @@ export const CHAPTERS: Chapter[] = [
         ],
         drill: {
           boards: ["statements", "call"],
-          tasks: [{ type: "insertAt", where: "before" }],
+          tasks: [
+            { type: "insertAt", where: "before" },
+            { type: "insertAt", where: "after" },
+          ],
           goals: 8,
         },
       },
@@ -115,15 +119,28 @@ export const CHAPTERS: Chapter[] = [
         kind: "game",
         teaches: [],
         summary:
-          "Your code is infested. Insects have eaten characters out of the source — squash them and repair the damage.",
+          "Your code is infested. Insects have eaten characters out of the source — hunt each one down and repair the damage.",
         teach: [
-          { label: "1 — squash the bugs", body: "Jump over every bug with the word motions w, e and b. Landing on a bug squashes it." },
-          { label: "2 — repair the code", body: "Bugs ate characters on their way through. Use insert mode to type them back until the code is valid again." },
+          {
+            label: "1 — hunt the bug",
+            body:
+              "One bug is highlighted at a time. Get the cursor onto it with everything you have learned so far — h j k l to crawl, w e b to cover ground.",
+          },
+          {
+            label: "2 — repair the damage",
+            body:
+              "The instruction names the character the bug ate. Press i (or a, when it ate the end of a line), type the character back, then press Esc. The next bug lights up straight away.",
+          },
+          {
+            label: "Everything from chapter one",
+            body:
+              "Nothing new here — this is the four motions, the two word motions and insert mode, used together the way you would actually use them.",
+          },
         ],
         drill: {
-          boards: ["object"],
+          boards: ["object", "array", "block"],
           tasks: [{ type: "bugFix" }],
-          goals: 1,
+          goals: BUG_COUNT,
         },
       },
     ],
